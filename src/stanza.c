@@ -28,7 +28,7 @@
 #endif
 
 /** Create a stanza object.
- *  This function allocates and initializes and blank stanza object.
+ *  This function allocates and initializes a blank stanza object.
  *  The stanza will have a reference count of one, so the caller does not
  *  need to clone it.
  *
