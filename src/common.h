@@ -158,6 +158,7 @@ struct _xmpp_conn_t {
     sock_t sock;
     tls_t *tls;
 
+    int is_raw;
     int tls_support;
     int tls_disabled;
     int tls_mandatory;
@@ -266,5 +267,6 @@ void disconnect_mem_error(xmpp_conn_t * const conn);
 /* auth functions */
 void auth_handle_open(xmpp_conn_t * const conn);
 void auth_handle_component_open(xmpp_conn_t * const conn);
+void auth_handle_open_raw(xmpp_conn_t * const conn);
 
 #endif /* __LIBSTROPHE_COMMON_H__ */

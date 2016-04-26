@@ -116,6 +116,7 @@ xmpp_conn_t *xmpp_conn_new(xmpp_ctx_t * const ctx)
         conn->stream_id = NULL;
         conn->bound_jid = NULL;
 
+        conn->is_raw = 0;
         conn->tls_support = 0;
         conn->tls_disabled = 0;
         conn->tls_mandatory = 0;
@@ -506,6 +507,16 @@ int xmpp_connect_component(xmpp_conn_t * const conn, const char * const server,
        of the stream */
     return _conn_connect(conn, conn->jid, server, port, XMPP_COMPONENT,
                          callback, userdata);
+}
+
+int xmpp_connect_raw(xmpp_conn_t * const conn,
+                     const char * const altdomain,
+                     unsigned short altport,
+                     xmpp_conn_handler callback,
+                     void * const userdata)
+{
+    conn->is_raw = 1;
+    return xmpp_connect_client(conn, altdomain, altport, callback, userdata);
 }
 
 /** Cleanly disconnect the connection.
@@ -1003,6 +1014,7 @@ static int _conn_connect(xmpp_conn_t * const conn,
                          xmpp_conn_handler callback,
                          void * const userdata)
 {
+    xmpp_open_handler open_handler;
 
     if (conn->state != XMPP_STATE_DISCONNECTED) return -1;
     if (type != XMPP_CLIENT && type != XMPP_COMPONENT) return -1;
@@ -1022,8 +1034,10 @@ static int _conn_connect(xmpp_conn_t * const conn,
     conn->conn_handler = callback;
     conn->userdata = userdata;
 
-    conn_prepare_reset(conn, type == XMPP_CLIENT ? auth_handle_open :
-                                                   auth_handle_component_open);
+    open_handler = conn->is_raw ? auth_handle_open_raw :
+                   type == XMPP_CLIENT ? auth_handle_open :
+                                         auth_handle_component_open;
+    conn_prepare_reset(conn, open_handler);
 
     /* FIXME: it could happen that the connect returns immediately as
      * successful, though this is pretty unlikely.  This would be a little

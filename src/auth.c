@@ -1233,3 +1233,11 @@ int _handle_missing_handshake(xmpp_conn_t * const conn, void * const userdata)
     xmpp_disconnect(conn);
     return 0;
 }
+
+void auth_handle_open_raw(xmpp_conn_t * const conn)
+{
+    handler_reset_timed(conn, 0);
+    /* user handlers are not called before authentication is completed. */
+    conn->authenticated = 1;
+    conn->conn_handler(conn, XMPP_CONN_CONNECT, 0, NULL, conn->userdata);
+}
