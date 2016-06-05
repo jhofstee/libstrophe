@@ -23,6 +23,13 @@
 #include <stdarg.h>
 #ifndef _WIN32
 #include <stdint.h>
+#include <sys/select.h>
+#include <errno.h>
+#else
+#include <winsock2.h>
+#define ETIMEDOUT WSAETIMEDOUT
+#define ECONNRESET WSAECONNRESET
+#define ECONNABORTED WSAECONNABORTED
 #endif
 
 
@@ -206,6 +213,10 @@ struct _xmpp_conn_t {
     /* connection events handler */
     xmpp_conn_handler conn_handler;
     void *userdata;
+
+    void (*write_callback)(struct _xmpp_conn_t * const, void *);
+    void *write_callback_userdata;
+
 
     /* other handlers */
     xmpp_handlist_t *timed_handlers;

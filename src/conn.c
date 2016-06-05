@@ -126,6 +126,8 @@ xmpp_conn_t *xmpp_conn_new(xmpp_ctx_t * const ctx)
 	conn->authenticated = 0;
 	conn->conn_handler = NULL;
 	conn->userdata = NULL;
+	conn->write_callback = NULL;
+	conn->write_callback_userdata = NULL;
 	conn->timed_handlers = NULL;
 	/* we own (and will free) the hash values */
 	conn->id_handlers = hash_new(conn->ctx, 32, NULL);
@@ -435,6 +437,9 @@ int xmpp_connect_client(xmpp_conn_t * const conn,
 
     conn->state = XMPP_STATE_CONNECTING;
     conn->timeout_stamp = time_stamp();
+    if (conn->write_callback) {
+        conn->write_callback(conn, conn->write_callback_userdata);
+    }
     xmpp_debug(conn->ctx, "xmpp", "attempting to connect to %s", connectdomain);
 
     return 0;
@@ -617,6 +622,10 @@ void xmpp_send_raw(xmpp_conn_t * const conn,
 	conn->send_queue_tail = item;
     }
     conn->send_queue_len++;
+
+    if (conn->write_callback) {
+        conn->write_callback(conn, conn->write_callback_userdata);
+    }
 }
 
 /** Send an XML stanza to the XMPP server.
@@ -664,6 +673,204 @@ void conn_open_stream(xmpp_conn_t * const conn)
 			 conn->type == XMPP_CLIENT ? XMPP_NS_CLIENT : XMPP_NS_COMPONENT,
 			 XMPP_NS_STREAMS);
 }
+
+
+/** Sets a function to call when data has been queued up to be sent (or after
+ *  part of the queue has been sent).
+ *
+ *  @param conn a Strophe connection object
+ *  @param callback A function to call when data is waiting to be sent
+ *  @param userdata User data to be passed to callback when called
+ */
+void xmpp_conn_set_write_callback(xmpp_conn_t * const conn,
+                                  void (*callback)(xmpp_conn_t * const conn, void * userdata),
+                                  void *userdata) 
+{
+    conn->write_callback = callback;
+    conn->write_callback_userdata = userdata;
+}
+
+/** Returns the underlying socket for the connection.
+ *
+ *  @param conn a Strophe connection object
+ *
+ *  @return The underlying socket
+ */
+xmpp_sock_t xmpp_conn_get_socket(xmpp_conn_t * const conn) 
+{
+    return conn->sock;
+}
+
+/** Instructs Strophe to read and process data from the connection object.
+ *  This should only be done if there is data to be read.
+ *
+ *  @param conn a Strophe connection object
+ */
+void xmpp_conn_read(xmpp_conn_t * const conn) 
+{
+    int ret;
+    char buf[4096];
+
+    if (conn->reset_parser) {
+        conn_parser_reset(conn);
+    }
+
+    switch (conn->state) {
+
+	case XMPP_STATE_CONNECTED:
+            if (conn->tls) {
+                ret = tls_read(conn->tls, buf, 4096);
+            } else {
+                ret = sock_read(conn->sock, buf, 4096);
+            }
+
+            if (ret > 0) {
+                ret = parser_feed(conn->parser, buf, ret);
+                if (!ret) {
+                    /* parse error, we need to shut down */
+                    /* FIXME */
+                    xmpp_debug(conn->ctx, "xmpp", "parse error, disconnecting");
+                    conn_disconnect(conn);
+                }
+            } else {
+                if (conn->tls) {
+                    if (!tls_is_recoverable(tls_error(conn->tls)))
+                    {
+                        xmpp_debug(conn->ctx, "xmpp", "Unrecoverable TLS error, %d.", tls_error(conn->tls));
+                        conn->error = tls_error(conn->tls);
+                        conn_disconnect(conn);
+                    }
+                } else {
+                    /* return of 0 means socket closed by server */
+                    xmpp_debug(conn->ctx, "xmpp", "Socket closed by remote host.");
+                    conn->error = ECONNRESET;
+                    conn_disconnect(conn);
+                }
+            }
+	    break;
+
+
+	case XMPP_STATE_CONNECTING:
+            /* If we're still connecting, there's nothing to be done yet. */
+            break;
+
+	case XMPP_STATE_DISCONNECTED:
+	    /* do nothing */
+            break;
+    }
+}
+
+/** Instructs Strophe to write pending data.
+ *  This should only be done if there is data to be written or
+ *  the underlying connection has been successfully made.
+ *
+ *  @param conn a Strophe connection object
+ */
+void xmpp_conn_write(xmpp_conn_t * const conn) 
+{
+    int ret;
+    xmpp_send_queue_t *sq, *tsq;
+    int towrite;
+
+    if (conn->state == XMPP_STATE_CONNECTING) {
+        /* connection complete */
+
+        /* check for error */
+        if (sock_connect_error(conn->sock) != 0) {
+            /* connection failed */
+            xmpp_debug(conn->ctx, "xmpp", "connection failed");
+            conn_disconnect(conn);
+            return;
+        }
+
+        conn->state = XMPP_STATE_CONNECTED;
+        xmpp_debug(conn->ctx, "xmpp", "connection successful");
+
+        /* send stream init */
+        conn_open_stream(conn);
+        return;
+    }
+
+
+
+    /* if we're running tls, there may be some remaining data waiting to
+     * be sent, so push that out */
+    if (conn->tls) {
+        ret = tls_clear_pending_write(conn->tls);
+
+        if (ret < 0 && !tls_is_recoverable(tls_error(conn->tls))) {
+            /* an error occured */
+            xmpp_debug(conn->ctx, "xmpp", "Send error occured, disconnecting.");
+            conn->error = ECONNABORTED;
+            conn_disconnect(conn);
+        }
+    }
+
+    /* write all data from the send queue to the socket */
+    sq = conn->send_queue_head;
+    while (sq) {
+        towrite = sq->len - sq->written;
+
+        if (conn->tls) {
+            ret = tls_write(conn->tls, &sq->data[sq->written], towrite);
+
+            if (ret < 0 && !tls_is_recoverable(tls_error(conn->tls))) {
+                /* an error occured */
+                conn->error = tls_error(conn->tls);
+                break;
+            } else if (ret < towrite) {
+                /* not all data could be sent now */
+                if (ret >= 0) sq->written += ret;
+                break;
+            }
+
+        } else {
+            ret = sock_write(conn->sock, &sq->data[sq->written], towrite);
+
+            if (ret < 0 && !sock_is_recoverable(sock_error())) {
+                /* an error occured */
+                conn->error = sock_error();
+                break;
+            } else if (ret < towrite) {
+                /* not all data could be sent now */
+                if (ret >= 0) sq->written += ret;
+                break;
+            }
+        }
+
+        /* all data for this queue item written, delete and move on */
+        xmpp_free(conn->ctx, sq->data);
+        tsq = sq;
+        sq = sq->next;
+        xmpp_free(conn->ctx, tsq);
+
+        /* pop the top item */
+        conn->send_queue_head = sq;
+        /* if we've sent everything update the tail */
+        if (!sq) conn->send_queue_tail = NULL;
+    }
+
+    /* tear down connection on error */
+    if (conn->error) {
+        /* FIXME: need to tear down send queues and random other things
+         * maybe this should be abstracted */
+        xmpp_debug(conn->ctx, "xmpp", "Send error occured, disconnecting.");
+        conn->error = ECONNABORTED;
+        conn_disconnect(conn);
+        return;
+    }
+
+    /* If there is still data to be sent, call our write callback so an outside
+     * event manager can determine when our socket is ready for more data. */
+    if (conn->send_queue_head) {
+        if (conn->write_callback) {
+            conn->write_callback(conn, conn->write_callback_userdata);
+        }
+    }
+}
+
+
+
 
 static void _log_open_tag(xmpp_conn_t *conn, char **attrs)
 {
